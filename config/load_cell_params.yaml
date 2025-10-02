@@ -1,0 +1,8 @@
+/load_cell_node:
+  ros__parameters:
+    # Publishing settings
+    publish_rate: 30.0
+    average_samples: 1
+    
+    # Calibration
+    calibration_file: "load_cell_calibration.json"
