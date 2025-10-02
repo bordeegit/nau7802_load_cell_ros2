@@ -18,25 +18,7 @@ def generate_launch_description():
         default_value=config_file,
         description='Path to config file'
     )
-    
-    # Declare launch arguments
-    # publish_rate_arg = DeclareLaunchArgument(
-    #     'publish_rate',
-    #     default_value='20.0',
-    #     description='Publishing rate in Hz'
-    # )
-    # 
-    # average_samples_arg = DeclareLaunchArgument(
-    #     'average_samples',
-    #     default_value='5',
-    #     description='Number of samples to average for each reading'
-    # )
-    # 
-    # calibration_file_arg = DeclareLaunchArgument(
-    #     'calibration_file',
-    #     default_value='load_cell_calibration.json',
-    #     description='Calibration file name'
-    # )
+
     
     # Load cell node
     load_cell_node = Node(
@@ -51,9 +33,6 @@ def generate_launch_description():
     )
     
     return LaunchDescription([
-        # publish_rate_arg,
-        # average_samples_arg,
-        # calibration_file_arg,
         config_file_arg,
         load_cell_node,
     ])

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ROS2 Node for NAU7802 Load Cell
+ROS2 Node for NAU7802 Load Cell - Fixed for higher sample rates
 """
 import rclpy
 from rclpy.node import Node
@@ -18,14 +18,28 @@ class LoadCellNode(Node):
         super().__init__('load_cell_node')
         
         # Declare parameters
-        self.declare_parameter('publish_rate', 10.0)
-        self.declare_parameter('average_samples', 5)
+        self.declare_parameter('publish_rate', 50.0)  # Increased default
+        self.declare_parameter('average_samples', 1)  # Reduced default for speed
         self.declare_parameter('calibration_file', 'load_cell_calibration.json')
+        self.declare_parameter('i2c_bus', 2)
+        self.declare_parameter('i2c_addr', 0x2A)
+        self.declare_parameter('adc_sample_rate', 80)  # 10, 20, 40, 80, or 320 SPS
         
         # Get parameters
         publish_rate = self.get_parameter('publish_rate').value
         self.average_samples = self.get_parameter('average_samples').value
         calibration_file = self.get_parameter('calibration_file').value
+        adc_rate_param = self.get_parameter('adc_sample_rate').value
+        
+        # Map sample rate parameter to driver constants
+        rate_map = {
+            10: NAU7802LoadCell.RATE_10SPS,
+            20: NAU7802LoadCell.RATE_20SPS,
+            40: NAU7802LoadCell.RATE_40SPS,
+            80: NAU7802LoadCell.RATE_80SPS,
+            320: NAU7802LoadCell.RATE_320SPS
+        }
+        adc_rate = rate_map.get(adc_rate_param, NAU7802LoadCell.RATE_80SPS)
         
         # Setup calibration file path
         try:
@@ -34,8 +48,11 @@ class LoadCellNode(Node):
         except:
             self.calibration_path = calibration_file
         
-        # Initialize load cell driver
-        self.load_cell = NAU7802LoadCell(calibration_file=self.calibration_path)
+        # Initialize load cell driver with specified sample rate
+        self.load_cell = NAU7802LoadCell(
+            calibration_file=self.calibration_path,
+            sample_rate=adc_rate
+        )
         
         # Publishers
         self.weight_pub = self.create_publisher(Float32, 'load_cell/weight', 10)
@@ -71,6 +88,7 @@ class LoadCellNode(Node):
             return
         
         self.get_logger().info('NAU7802 initialized successfully')
+        self.get_logger().info(f'ADC sample rate: {adc_rate_param} SPS')
         
         # Try to load existing calibration
         if self.load_cell.load_calibration():
@@ -83,16 +101,24 @@ class LoadCellNode(Node):
         # Create timer for publishing
         self.timer = self.create_timer(1.0 / publish_rate, self.publish_callback)
         
-        self.get_logger().info(f'Load cell node started, publishing at {publish_rate} Hz, averaging {self.average_samples} samples per reading.')
+        self.get_logger().info(f'Load cell node started, publishing at {publish_rate} Hz')
+        if self.average_samples > 1:
+            self.get_logger().info(f'Averaging {self.average_samples} samples per reading')
     
     def publish_callback(self):
         """Timer callback to read and publish weight data"""
         try:
-            # Read weight with averaging
-            weight_grams = self.load_cell.read_weight_average(self.average_samples)
+            # Read weight (with optional averaging)
+            if self.average_samples > 1:
+                weight_grams = self.load_cell.read_weight_average(self.average_samples)
+            else:
+                weight_grams = self.load_cell.read_weight()
             
             if weight_grams is None:
                 return
+            
+            # Get timestamp once
+            stamp = self.get_clock().now().to_msg()
             
             # Publish weight in grams
             weight_msg = Float32()
@@ -101,15 +127,16 @@ class LoadCellNode(Node):
             
             # Publish as WrenchStamped (force in Newtons)
             wrench_msg = WrenchStamped()
-            wrench_msg.header.stamp = self.get_clock().now().to_msg()
+            wrench_msg.header.stamp = stamp
             wrench_msg.header.frame_id = 'load_cell'
             wrench_msg.wrench.force.z = float(weight_grams * 0.00980665)  # grams to Newtons
             self.wrench_pub.publish(wrench_msg)
             
-            # Publish raw value
-            raw_msg = Float32()
-            raw_msg.data = float(self.load_cell.read_raw())
-            self.raw_pub.publish(raw_msg)
+            # Publish raw value (only if data is ready to avoid blocking)
+            if self.load_cell.data_ready():
+                raw_msg = Float32()
+                raw_msg.data = float(self.load_cell.read_raw())
+                self.raw_pub.publish(raw_msg)
             
         except Exception as e:
             self.get_logger().error(f'Error reading load cell: {str(e)}')
@@ -137,6 +164,7 @@ class LoadCellNode(Node):
     
     def weight_calibration_callback(self, request, response):
         """Service callback for weight calibration"""
+        # Note: This assumes a 1kg weight. You may want to make this a parameter
         known_weight_kg = 1.0
         
         self.get_logger().info(f'Starting weight calibration with {known_weight_kg}kg weight...')

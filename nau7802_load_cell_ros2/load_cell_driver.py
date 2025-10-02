@@ -21,12 +21,30 @@ class NAU7802LoadCell:
     REG_ADC = 0x15
     REG_PGA = 0x1B
     
-    def __init__(self, calibration_file='load_cell_calibration.json'):
+    # Sample rates
+    RATE_10SPS = 0b000
+    RATE_20SPS = 0b001
+    RATE_40SPS = 0b010
+    RATE_80SPS = 0b011
+    RATE_320SPS = 0b111
+    
+    def __init__(self, calibration_file='load_cell_calibration.json', sample_rate=RATE_80SPS):
         self.bus = smbus2.SMBus(self.I2C_BUS)
         self.zero_offset = 0
         self.scale_factor = 1.0
         self.initialized = False
         self.calibration_file = calibration_file
+        self.sample_rate = sample_rate
+        
+        # Calculate expected sample period based on rate
+        rate_to_period = {
+            self.RATE_10SPS: 0.100,
+            self.RATE_20SPS: 0.050,
+            self.RATE_40SPS: 0.025,
+            self.RATE_80SPS: 0.0125,
+            self.RATE_320SPS: 0.003125
+        }
+        self.sample_period = rate_to_period.get(sample_rate, 0.0125)
     
     def reset(self):
         """Soft reset sequence"""
@@ -50,20 +68,26 @@ class NAU7802LoadCell:
     
     def configure(self):
         """Configure NAU7802 for load cells"""
+        # Set AVDDS bit (use internal LDO)
         pu_ctrl = self.bus.read_byte_data(self.I2C_ADDR, self.REG_PU_CTRL)
         pu_ctrl |= (1 << 7)
         self.bus.write_byte_data(self.I2C_ADDR, self.REG_PU_CTRL, pu_ctrl)
         
+        # Set LDO voltage (3.0V) and gain (128x) in CTRL1
         self.bus.write_byte_data(self.I2C_ADDR, self.REG_CTRL1, (5 << 3) | 7)
         
+        # Set sample rate in CTRL2
         ctrl2 = self.bus.read_byte_data(self.I2C_ADDR, self.REG_CTRL2)
-        ctrl2 &= ~(0b111 << 4)
+        ctrl2 &= ~(0b111 << 4)  # Clear rate bits
+        ctrl2 |= (self.sample_rate << 4)  # Set desired rate
         self.bus.write_byte_data(self.I2C_ADDR, self.REG_CTRL2, ctrl2)
         
+        # Configure ADC - disable chopper (set to 0b11)
         adc_reg = self.bus.read_byte_data(self.I2C_ADDR, self.REG_ADC)
         adc_reg = (adc_reg & ~(0b11 << 4)) | (0b11 << 4)
         self.bus.write_byte_data(self.I2C_ADDR, self.REG_ADC, adc_reg)
         
+        # Configure PGA - use low ESR caps
         pga_reg = self.bus.read_byte_data(self.I2C_ADDR, self.REG_PGA)
         pga_reg &= ~(1 << 6)
         self.bus.write_byte_data(self.I2C_ADDR, self.REG_PGA, pga_reg)
@@ -108,26 +132,42 @@ class NAU7802LoadCell:
             raw |= 0xFF000000
         return raw
     
+    def read_raw_with_wait(self, timeout=1.0):
+        """Read raw value, waiting for data to be ready"""
+        start_time = time.time()
+        while not self.data_ready():
+            if time.time() - start_time > timeout:
+                return None
+            time.sleep(0.001)  # Short sleep to prevent busy-waiting
+        return self.read_raw()
+    
     def read_average(self, samples=20):
-        """Read average of multiple samples"""
+        """Read average of multiple samples - OPTIMIZED"""
         readings = []
         for _ in range(samples):
-            while not self.data_ready():
-                time.sleep(0.01)
-            readings.append(self.read_raw())
-            time.sleep(0.05)
-        return statistics.mean(readings)
+            raw = self.read_raw_with_wait(timeout=0.5)
+            if raw is not None:
+                readings.append(raw)
+        
+        return statistics.mean(readings) if readings else None
     
     def zero_calibration(self, samples=30):
         """Zero point calibration"""
-        time.sleep(3)  # Stabilization
-        self.zero_offset = self.read_average(samples)
-        return True
+        time.sleep(1)  # Reduced stabilization time
+        avg = self.read_average(samples)
+        if avg is not None:
+            self.zero_offset = avg
+            return True
+        return False
     
     def weight_calibration(self, known_weight_kg, samples=30):
         """Calibrate with known weight"""
-        time.sleep(3)  # Stabilization
+        time.sleep(1)  # Reduced stabilization time
         weight_reading = self.read_average(samples)
+        
+        if weight_reading is None:
+            return False
+        
         raw_difference = weight_reading - self.zero_offset
         
         if abs(raw_difference) < 1000:
@@ -143,7 +183,8 @@ class NAU7802LoadCell:
             'zero_offset': self.zero_offset,
             'scale_factor': self.scale_factor,
             'calibration_date': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'units': 'grams'
+            'units': 'grams',
+            'sample_rate': self.sample_rate
         }
         
         with open(self.calibration_file, 'w') as f:
@@ -166,14 +207,14 @@ class NAU7802LoadCell:
         return False
     
     def read_weight(self):
-        """Read weight in grams"""
+        """Read weight in grams - FAST VERSION"""
         if not self.initialized:
             return None
         
-        while not self.data_ready():
-            time.sleep(0.01)
+        raw = self.read_raw_with_wait(timeout=0.5)
+        if raw is None:
+            return None
         
-        raw = self.read_raw()
         weight_grams = (raw - self.zero_offset) * self.scale_factor
         return weight_grams
     

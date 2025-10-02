@@ -1,8 +1,11 @@
 /load_cell_node:
   ros__parameters:
     # Publishing settings
-    publish_rate: 30.0
-    average_samples: 1
+    publish_rate: 20.0
+    average_samples: 4
     
     # Calibration
     calibration_file: "load_cell_calibration.json"
+
+    # Load cell settings
+    adc_sample_rate: 80  # 10, 20, 40, 80, or 320 SPS
